@@ -1,0 +1,6 @@
+{
+  "name": "TakaFlow",
+  "description": "Offline-first voice expense tracker, loan ledger, budget planner, and Gemini AI finance companion in Bangladeshi Taka with an adaptive Liquid Glass UI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

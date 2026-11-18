@@ -1,0 +1,500 @@
+## 1. What the app is
+
+A daily income and expense tracker for Android, built with React Native. Money can be logged by **voice** or by **full manual entry**. An optional **AI Agent** can add, edit and delete data by voice or text, and it always shows a preview before changing anything.
+
+- **Existing flows are fully offline.** The voice parser is a local rule-based parser. Gemini is never used in these flows.
+- **The AI Agent is separate.** It is the only part that talks to the network, and it can be switched off in Settings.
+- **Currency is TAKA**, through the `CURRENCY` constant.
+- **UI style is neo-brutalist.** Hard shadows, thick borders, monospace fonts, yellow primary. Every screen uses `BrutalBox`.
+
+---
+
+## 2. Tech stack and environment
+
+| Item            | Value                                                                           |
+| --------------- | ------------------------------------------------------------------------------- |
+| Framework       | Expo SDK 57, React Native, TypeScript                                           |
+| Routing         | expo-router (file-based, `src` structure)                                       |
+| Filenames       | kebab-case                                                                      |
+| Experiments     | `typedRoutes`, `reactCompiler`                                                  |
+| Storage         | AsyncStorage (local only)                                                       |
+| Speech in       | `expo-speech-recognition` (Android Google speech service)                       |
+| Speech out      | `expo-speech` on native, browser `speechSynthesis` on web                       |
+| Notifications   | `expo-notifications` (local, scheduled)                                         |
+| App lock        | `expo-local-authentication`                                                     |
+| AI              | Gemini Interactions API, model `gemini-3-flash-preview`                         |
+| Android package | `com.anonymous.VoiceExpenseTracker`                                             |
+| App version     | `1.2.0`, `runtimeVersion: { policy: "appVersion" }`                             |
+| Permissions     | `RECORD_AUDIO` (notification permission is requested at runtime on Android 13+) |
+
+**Machine:** Windows with Git Bash.
+Project path: `E:\Working Files\SAAS Projects\Expense tracker app new by native\VoiceExpenseTracker`
+Git Bash path: `/e/Working Files/SAAS Projects/Expense tracker app new by native/VoiceExpenseTracker`
+
+**Testing**
+
+- Web: `http://localhost:8081` in a phone-size frame. The React Compiler runs on web, so ref and setState-in-render errors show up there first.
+- Phone: the installed standalone app. It is **not** Expo Go.
+
+**Health checks:** `npx tsc --noEmit` (clean before the build), `npx expo-doctor` (21/21 passed).
+
+**Packages rejected:** `@react-native-voice/voice`, `expo-av`, `react-native-dotenv` with `babel.config.js`, direct `@react-navigation/native` imports (use `useFocusEffect` from `expo-router`).
+
+---
+
+## 3. Navigation
+
+**Bottom bar** (`src/components/custom-tab-bar.tsx`): `HOME · HISTORY · + · PLANS · SETTINGS`
+
+- `+` is the floating add button. It opens New Entry on the MANUAL tab.
+- `SETTINGS` pushes `/settings`, a root-stack modal. It opens over any page and closing returns to the same page.
+- The bar lists only `["index", "history", "plans"]` plus Settings.
+
+**Screens** (`src/app/(tabs)/_layout.tsx`, a `Tabs` navigator with `CustomTabBar`): `index`, `history`, `report`, `plans`, `wallets`, `recurring`. Report, Wallets and Recurring are declared but not in the bar. They are reached from Home and other screens.
+
+**Other routes:** `settings` (modal), `agent`, `recap`, `badges` (auto-registered by Expo Router).
+
+**Home header:** greeting and date on the left; wallet icon (opens `/wallets`) and mic icon (opens New Entry on the VOICE tab) on the right.
+
+⚠️ **Never overwrite** `src/app/(tabs)/_layout.tsx` or the root `src/app/_layout.tsx`. An earlier mistake overwrote the tabs layout with a copy of the root layout, which removed the bottom bar. It was fixed by restoring that one file with git.
+
+**Root layout provider order (do not change):**
+`GestureHandlerRootView > SafeAreaProvider > AppLockProvider > ConfirmDialogProvider > CategoriesProvider > TransactionsProvider > WalletsProvider > PurchasePlansProvider > RecurringProvider > QuickAddProvider > TransferProvider > UndoToastProvider > BadgeToastProvider > BadgesProvider`
+
+Inside the providers: `WalletTransactionSync`, `RecurringTransactionSync`, `NotificationSync`, the `Stack` (screens `(tabs)` and `settings` as modal), `GlobalQuickAddModal`, `GlobalTransferModal`, `UndoSnackbar`, `BadgeUnlockToast`, `AppLockOverlay`, `StatusBar`.
+`unstable_settings = { anchor: "(tabs)" }`. Fonts: `Mono-Regular`, `Mono-Bold`.
+
+---
+
+## 4. Features
+
+### 4.1 Home (`(tabs)/index.tsx`)
+
+Top to bottom:
+
+1. Header (greeting, date, wallet icon, mic icon).
+2. Wallet slider with a yellow summary card. The "This Month" card mirrors `WalletCard`'s layout, and its chart icon links to `/report`.
+3. 🟡 PERIOD SUMMARY card (`RangeSummaryCard`), see 4.9.
+4. Weekly recap card (LAST / THIS WEEK toggle).
+5. Monthly budget card (and category budgets).
+6. Check-in streak card.
+7. Quick-access tiles (Badges and others).
+
+The ScrollView uses `scrollOuter: { flex: 1, minHeight: 0 }` so it doesn't push the tab bar off-screen on web.
+
+Header date fix (smaller font, shrinks to fit, no overlap with the mic button) was delivered as a snippet. 🟡 Applied or not is unconfirmed.
+
+### 4.2 Adding transactions
+
+**New Entry modal** (opened globally through the quick-add context). Two tabs:
+
+- **MANUAL** (default): full form with amount, type, category, description, wallet, date. The TAKA input has no web focus outline (`webNoOutline`).
+- **VOICE**: only the hold-to-talk mic and "try to say" chips.
+
+**Rules settled**
+
+- The FAB opens MANUAL. The Home header mic opens VOICE.
+- No manual-entry button in any header.
+- No double-modal, double-save or duplicate-entry bugs.
+- Rejected layouts (do not repeat): mic row at the top of the modal, tap-to-listen banner, voice stacked with the item form.
+
+**Voice flow** (`use-voice.ts`): hold to talk, the local parser turns the text into drafts, the modal opens with them for review.
+
+Fixes already in (do not revert):
+
+- Speech events are global, so each hook instance reacts only to sessions it started (`activeRef`).
+- Stuck-mic race fixed with `stopRequestedRef` and a re-stop in the start handler.
+- `deliverLastHeardIfNeeded` fires `onFinal` with the last heard text 300 ms after `end`.
+- `launchingRef` guards against double launches (8 s reset).
+
+🟡 Still unverified: web long-press guard (`userSelect: none` plus context-menu block), and a quick tap leaving the mic open.
+
+### 4.3 History (`(tabs)/history.tsx`)
+
+Search, type filters (all, income, expense, transfer), wallet chips, summary card, chart, grouped list, swipe to delete with UNDO, tap to edit.
+
+🟡 **New date filter:** a row under the search box with a calendar button (`ALL DATES` or the range, yellow when active) and an X to clear. It opens the date-range picker. The filter applies after the wallet filter, so summary, chart, count, list and totals all follow it. It filters by day only, so transfers are kept.
+
+### 4.4 Report (`(tabs)/report.tsx`)
+
+Monthly report: net balance, income, expense, savings rate, top category, category breakdown, 6-month MoM comparison, spending trend. The wallet filter applies.
+
+🟡 **New CUSTOM DAYS mode**
+
+- A PERIOD row with MONTH and CUSTOM DAYS buttons sits above the month navigator.
+- In custom mode the month arrows are replaced by a range button (label plus CHANGE) that reopens the picker.
+- Percent changes compare against the previous same-length period, labeled `PREV PERIOD`.
+- The MoM box and trend box are hidden in custom mode.
+- Cancelling the picker before any range was applied returns to MONTH.
+- The custom range excludes transfers.
+
+### 4.5 Wallets and transfers (`(tabs)/wallets.tsx`)
+
+- Multiple wallets. Default is "Cash" (`cash-outline`, `#FDE047`). Custom colors and icons, per-wallet hide-balance toggle, total-balance hide toggle.
+- Transfers between wallets through `TransferProvider` (`openCreate`, `openEdit`). The transfer modal lives inside the root layout.
+- Swipeable rows. `SwipeableRow` needs `actionsInsetTop={CARD_TOP_SPACER}` (`= 12`) in `wallets.tsx` to stay aligned. 🟡 Unconfirmed on device.
+- Custom wallet fills use `getContrastInk(w.color)` for readable text.
+- Real brand-logo PNGs for `WALLET_PRESETS` are waiting for the user's files. Bundled local images only, never fetched.
+
+### 4.6 Plans and loans (`(tabs)/plans.tsx`, titled PLANS & LOANS)
+
+**Item plans:** things to buy, with an expected amount, category, optional target date, and a checkbox to mark as bought (records actual amount and wallet).
+
+**Loans (Phase 7a / 7b)**
+
+- Filter: ITEMS / LENT / BORROWED. Summary: OWED TO YOU / YOU OWE.
+- Per loan: person, principal, due date, status chip (`settled`, `overdue`, `due-soon`, `on-track`), progress, labels `DUE IN nD` / `OVERDUE nD` / `DUE TODAY`. "Due soon" means within 7 days.
+- Repayments (`LoanRepaymentModal`) with FULL REMAINING. Overpayment is blocked with an inline error.
+- Details modal (`LoanDetailsModal`) with two-tap confirms for deleting a payment and SETTLE ALL.
+- Lowering the amount to the paid sum auto-settles. Deleting the settling payment reopens the loan.
+- Swipe delete with UNDO.
+- **Design decision:** repayments do **not** touch wallets or transactions. Loans are a separate ledger.
+
+Status: the user reported the web tests as done, with no pass/fail details. ✅ (as reported)
+
+⚠️ **Suspected bug, unconfirmed:** `addPlan` in `use-purchase-plans.tsx` may only save `dueDate` for loans, so an item plan's target date entered when **adding** might be lost. Editing works. Check: add a new item plan with a date, then reopen it with Edit.
+
+### 4.7 Recurring (`recurring.tsx`)
+
+Rules for repeating income or expense (daily, weekly, monthly, etc.) with start and end dates, pause/resume, and delete with UNDO. `RecurringTransactionSync` creates due entries automatically. Schedule math is in `src/utils/recurring-schedule.ts` (`nextOccurrence`, `getDueOccurrences`, `computeNextDue`, `describeFrequency`, `formatDateShort`).
+
+### 4.8 Budgets
+
+- A monthly budget (`@voice-expense/budget/v1`) and per-category budgets (`@voice-expense/category-budgets/v1`) through `useCategoryBudgets()`.
+- Shown on Home through `BudgetCard`.
+- ⚠️ `BudgetCard` may not refresh right after an agent budget change.
+
+### 4.9 🟡 Period summary (new, untested)
+
+Files: `src/utils/date-range.ts`, `src/components/date-range-picker-modal.tsx`, `src/components/range-summary-card.tsx`.
+
+- **Home card:** PERIOD SUMMARY with chips TODAY, YESTERDAY, 7 DAYS, THIS MONTH, LAST MONTH, CUSTOM. Default is TODAY. Shows INCOME, EXPENSE and `NET · N ENTRIES`. Empty state: "NOTHING LOGGED FOR THIS PERIOD." Refreshes when the app returns to the foreground.
+- **Picker modal:** SINGLE DAY / RANGE modes, preset chips, Sunday-first month grid with prev/next, today outlined, in-range shaded, endpoints in primary color, hint text, CANCEL / APPLY. Range taps work in either order. Mounted only while open.
+- **Math:** `rangeTotals` excludes transfers, includes recurring, rounds to 2 decimals. Date keys are local `YYYY-MM-DD`.
+- **Exports of `date-range.ts`:** `UNIT_LABEL`, types `RangePreset`, `DayRange`, `RangeTotals`, `PRESET_LABELS`, `PRESET_ORDER`, `MONTHS_LONG`, `keyOf`, `toKey`, `fromKey`, `addDays`, `presetRange`, `rangeTotals`, `formatDayLabel`, `formatRangeLabel`, `formatAmount`.
+- ⚠️ `UNIT_LABEL` is hardcoded to `"TAKA"` with a TODO. It should read the `CURRENCY` constant.
+
+### 4.10 Weekly recap, MoM, badges, undo, swipe
+
+- **Weekly recap** (`recap` screen and Home card). ⚠️ Saturday week-start question is unanswered.
+- **MoM** (`useMomStats`) powers the 6-month comparison.
+- **Badges** (`use-badges.tsx`, `badge-definitions.ts`): quick-access tile only, no bottom-nav tab. Unlocking shows a lightweight toast (`BadgeUnlockToast`). The CONSISTENCY badge uses the check-in streak.
+- **Undo delete:** `UndoToastProvider`, `showUndo({ message, onUndo, duration = 4000 })`. Used for transactions, plans, recurring rules, wallets.
+- **Swipeable rows:** `SwipeableRow` with delete/edit actions.
+
+### 4.11 Check-in streak (✅ delivered, in the build)
+
+- A day counts if a non-recurring transaction was logged **or** NOTHING SPENT TODAY was tapped.
+- **A streak never breaks because a day had no transactions.** Today never breaks it either. No "no-spend" streak box. No per-day-logging-required streak (both rejected).
+- UNDO CHECK-IN link. Monthly calendar modal (`CheckinCalendarModal`).
+- Stored locally (`@voice-expense/checkins/v1`, max 800 days). **Not in backups yet.**
+- A check-in suppresses today's reminder.
+- Files: `checkin-streak.ts`, `checkin-store.ts`, `use-checkins.ts`, `checkin-calendar.ts`, `checkin-calendar-modal.tsx`, `checkin-streak-card.tsx`.
+- The old streak files (`streak-badge.tsx`, `streak-calendar-modal.tsx`, `streaks.ts`) are deleted.
+
+### 4.12 Notifications (✅ delivered, in the build; device test pending)
+
+All **local**, scheduled, firing even with the app closed.
+
+- **9 PM daily reminder** if nothing is logged and no check-in exists.
+- **9 AM** for recurring due today, loan due day and the day before, plan target dates.
+- Times are editable (typed hour and minute). Defaults 21:00 and 09:00.
+- Amounts shown by default, with a hide switch.
+- Settings section: master switch, two time rows, per-type switches (daily, recurring, loans, plans), show/hide amounts, test button (fires in 5 s), battery-saver hint.
+- The planner builds up to 60 notifications over a 14-day horizon. IDs: `daily-YYYY-MM-DD`, `rec-<ruleId>-<day>`, `loan-<planId>-<day>`, `plan-<planId>-<day>`.
+- Tapping a notification opens the matching screen (`add` opens New Entry, `recurring`, `plans`).
+- `NotificationSync` rebuilds the schedule 1.2 s after any change and whenever the app becomes active.
+- Files: `notification-settings.ts`, `use-notification-settings.ts`, `notification-planner.ts`, `notifications.ts`, `notification-sync.tsx`, `notification-time-row.tsx`.
+- **Known limits:** needs permission. Xiaomi, Oppo and Samsung battery savers may block it. Reboot survival is not guaranteed. The app must be opened sometimes to refill the schedule.
+- ⚠️ The `expo-notifications` calls were written from memory. `tsc` passes, but real behavior needs the device test.
+
+### 4.13 AI Agent
+
+A separate screen opened from Home. No new tab.
+
+**Capabilities (guide screen)**
+
+- READY: look things up, transactions, wallets, transfers, budgets, categories, recurring, purchase plans.
+- COMING SOON: loans and debts. The guide card must keep the title **"PURCHASE PLANS"** until the agent has loan tools.
+
+**Rules (authoritative)**
+
+1. A default key comes from `.env`. A key saved in Settings overrides it. REMOVE falls back to the default.
+2. Hold-to-talk is docked at the bottom. The agent speaks its replies (speaker icon to mute).
+3. English, Bangla and Banglish are supported.
+4. **Every write action needs confirmation, with a PREVIEW and a way to EDIT before approving.**
+5. A privacy notice and an on/off switch live in Settings.
+
+**Layout:** the guide is the landing page. BACK from chat goes to the guide first. The guide can be revisited without clearing the chat. Chat-only icons are hidden on the guide. Do not return to the round mic, the two-row dock, or heavy nested guide cards.
+
+**Usage bar:** shows tokens used and left. The API only returns per-call usage, so remaining = user-typed LIMIT − USED. Until a limit is set, it shows a labeled `EST.` default of 250K.
+
+**Technical**
+
+- REST `POST https://generativelanguage.googleapis.com/v1beta/interactions`
+- Headers: `x-goog-api-key`, `Content-Type: application/json`, `Api-Revision: 2026-05-20`.
+- Body: `model`, `input`, `tools`, `store: false` (stateless).
+- All steps are resent in order, including model `thought` and `function_call` steps unchanged.
+- No system-instruction field, so rules are prefixed to the first user step.
+- Function result step: `{ type: "function_result", name, call_id, result: [{ type: "text", text: <JSON string> }] }`.
+- **Web dev only:** the endpoint is blocked by CORS, so run `node scripts/ai-dev-proxy.cjs` (port 8787). The phone calls Google directly.
+- **Tools** (`AGENT_TOOLS` at module level in `agent.tsx`): read tools, write tools, transfer tools, and 15 manage tools (budgets, categories, recurring, plans). **Loan tools are not built yet.**
+- Files: `ai-client.ts`, `ai-storage.ts`, `use-ai-usage.ts`, `use-ai-settings.ts`, `ai-agent.ts`, `ai-tools.ts`, `ai-write-tools.ts`, `ai-transfer-tools.ts`, `ai-manage-tools.ts`, `use-ai-chat.ts`, `agent-preview-card.tsx`, `agent-guide.tsx`, `speak.ts`.
+- History compaction (dropping thought/tool steps from older turns) is an assumption. If the API rejects a long chat (more than 4 messages), use CLEAR.
+- The manage tools are 🟡 untested. Tests: set a Food budget, add/pause/delete a rent rule, add and delete a Pets category, add a smart-watch plan and mark it bought.
+
+### 4.14 Settings (`settings.tsx`, root-stack modal)
+
+Sections: theme (SYSTEM / LIGHT / DARK), notifications, AI agent (privacy, switch, key, limit), app lock, backup (export / restore), clear data. User-facing text says "plans & loans".
+
+- Long toggle labels (NOTIFICATIONS, AI AGENT, APP LOCK) use `btnLabelFit` (`flexShrink: 1, minWidth: 0, textAlign: "center"`) so they don't overflow. 🟡 Unconfirmed applied.
+- ⚠️ `Alert.alert` does nothing on web, so Settings alerts (App Lock, Export, Restore) only work on the phone.
+
+### 4.15 App lock
+
+Biometric lock with an overlay (`AppLockProvider`, `AppLockOverlay`, `useAppLock`).
+
+### 4.16 Dark mode (Phase 6, ✅)
+
+SYSTEM / LIGHT / DARK, set only in Settings. See section 7.
+
+### 4.17 Backup (`src/services/backup-service.ts`)
+
+**Currently included:** transactions, wallets, plans and loans. Payload `{ version, exportedAt, transactions, wallets, purchasePlans }`. Exports: `buildBackupPayload`, `exportBackup`, `pickAndRestoreBackup`. Restore is blocked if the file has no wallets.
+
+**Not included (the gap being fixed first):** recurring rules, custom categories, monthly and category budgets, check-ins, notification settings, theme, AI key, agent chat.
+
+⚠️ Unknown whether restore replaces or merges. That is checked as part of the backup work.
+
+---
+
+## 5. Data and storage
+
+**Known AsyncStorage keys**
+
+| Key                                     | Contents              |
+| --------------------------------------- | --------------------- |
+| `@voice_expense_tracker/purchase_plans` | Plans and loans       |
+| `@voice-expense/budget/v1`              | Monthly budget        |
+| `@voice-expense/category-budgets/v1`    | Category budgets      |
+| `@voice-expense/checkins/v1`            | Check-ins             |
+| `@voice-expense/notifications/v1`       | Notification settings |
+| `@voice-expense/theme/v1`               | Theme mode            |
+| `@voice-expense/ai-key/v1`              | User's own Gemini key |
+| `@voice-expense/ai-usage/v1`            | Token usage and limit |
+| `@voice-expense/ai-enabled/v1`          | Agent on/off          |
+
+Transactions, wallets, recurring rules and categories also have keys. Get the full list with `grep -rn "@voice" src --include=*.ts --include=*.tsx`.
+
+**Core types**
+
+- `Transaction { id, type ("income" | "expense" | "transfer"), amount, category, description, date (ISO), raw?, walletId?, toWalletId?, recurringId? }`
+- `PurchasePlan { id, name, expectedAmount?, category, note?, createdAt, completed, completedAt?, actualAmount?, walletId?, kind?, date?, dueDate?, repayments? }`, with `PlanKind = "item" | "lent" | "borrowed"`
+- `RecurringRule { id, type, amount, category, description, walletId, frequency, startDate, endDate?, active, lastGeneratedDate?, createdAt }`
+
+**Hook APIs (real)**
+
+- `useTransactions()`: `transactions, loading, add(items), remove(id), update(id, patch), clearAll, reassignWallet, assignMissingWalletId, reload, restore(transaction, index?)`
+- `useWallets()`: `wallets, loading, selectedWalletId, totalBalanceHidden, toggleTotalBalanceHidden, selectWallet, addWallet, updateWallet, toggleBalanceHidden, removeWallet, reload`
+- `usePurchasePlans()`: `addPlan, updatePlan(id, patch), removePlan, completePlan, reopenPlan, addRepayment, removeRepayment, settleLoan, clearAll, reload, restorePlan`
+- `useRecurring()`: `rules, loading, addRule, updateRule, removeRule, toggleActive, markGenerated, restoreRule`
+- `useCategoryBudgets()`: `budgets, loading, setBudget, removeBudget`
+- `useConfirmDialog()` returns `{ confirm({ title, message, confirmLabel, destructive, onConfirm }) }`
+- Also: `useCategories`, `useUndoToast`, `useAppLock`, `useTransfer`, `useTabBarSpace`, `useMomStats`
+- Quick-add context: `{ visible, drafts, transcript, initialTab, openBlank, openVoice, openWithDrafts, close }`
+
+**Loan helpers** (`src/utils/loans.ts`): `isLoanKind`, `isLoan`, `loanPrincipal`, `loanPaid`, `loanRemaining`, `loanProgress`, `daysUntil`, `loanStatus`, `dueLabel`, `loanTotals(plans, kind)`, `withSettlement`, `personNames`, `formatShortDate`, `DUE_SOON_DAYS = 7`, `round2`.
+
+---
+
+## 6. Security and keys
+
+- **Never paste an API key into chat, screenshots or the repo.** Keys were pasted earlier, so **rotate both**: delete the old keys in AI Studio and create new ones for `.env` only.
+- For terminal tests use `export GEMINI_API_KEY=...` and `$GEMINI_API_KEY`.
+- `.env` must be untracked. Check with `git ls-files .env` (should print nothing). If it prints the file: make sure `.gitignore` lists `.env`, run `git rm --cached .env`, then commit.
+- `EXPO_PUBLIC_` values are bundled **in plain text** in any build. Fine for personal use. Before a public Play Store release, put the key behind a small backend.
+- In EAS, use `plaintext` or `sensitive` visibility. `secret` doesn't work for `EXPO_PUBLIC_` variables.
+- **Backup decision (proposed, awaiting a yes):** the Gemini key stays **out** of backup files, because backup files get shared and synced.
+
+---
+
+## 7. Theme and dark-mode system
+
+- `src/constants/app-theme.ts`: base `Palette` (bg `#F4EFE4`, card `#FFFFFF`, ink `#161512`, primary `#FFC53D`, income `#3E7C59`, expense `#D6472B`, sub `#6B6558`, muted `#A39C8C`, border `#161512`, chip `#EAE2CF`), `Shadow = { offset: 5 }`, `Font = { regular: "Mono-Regular", bold: "Mono-Bold" }`, `Radius`.
+- `src/constants/palettes.ts`: `LightPalette`, `DarkPalette`, `ThemePalette`, `ThemeScheme`.
+- `src/hooks/use-app-theme.tsx`: `ThemeProvider` (storage `@voice-expense/theme/v1`, default `system`), `useTheme()` (returns `palette, scheme, mode, setMode`), `makeStyles`.
+- ⚠️ **Never import from `@/hooks/use-theme`.** That is an Expo template file that shadowed our hook once. Always use `@/hooks/use-app-theme`.
+
+**Conversion pattern for any new or changed UI**
+
+```ts
+import { makeStyles, useTheme } from "@/hooks/use-app-theme";
+const useStyles = makeStyles((P) => ({
+  /* ... */
+}));
+// in the component:
+const { palette: P } = useTheme();
+const styles = useStyles();
+```
+
+Remove the unused `StyleSheet` import. Don't use static `Palette` in converted files, except `Font`, `Shadow`, `Radius` from `@/constants/app-theme`. Exception: `LightPalette` for text on always-yellow or category-colored fills.
+
+**Color mapping**
+
+| Use                                              | Color        |
+| ------------------------------------------------ | ------------ |
+| Text and icons on primary fills                  | `P.onColor`  |
+| Text on income/expense fills                     | `P.onStatus` |
+| Inputs, secondary buttons, chips ("white" fills) | `P.raised`   |
+| Text on ink fills                                | `P.onInk`    |
+| Hard shadows                                     | `P.shadow`   |
+| Borders                                          | `P.border`   |
+| Card and modal backgrounds                       | `P.card`     |
+
+Fixed fills (yellow cards, wallet colors, category colors, streak gradients) use literal text colors. On always-yellow cards use `LightPalette.income/expense` for numbers. Custom wallet fills use `getContrastInk(w.color)`. `#EF4444` destructive red stays. Category-colored fills use `ON_CATEGORY = "#FFFFFF"`. Dark-aware neutral fills: `scheme === "dark" ? P.chip : <light constant>`. Sub-components with styles need their own `useStyles()`. Web-only style objects (`webBreakWord`, `webNoOutline`, `btnLabelFit`) live outside the factory.
+
+---
+
+## 8. Coding rules (React Compiler safe)
+
+Each rule came from a real crash and has a standing fix.
+
+1. **No setState inside a `useEffect` keyed on `visible` or an editing item.** Use the render-time tracked-prop pattern: keep `visible` and the identity prop in `useState`, compare during render, reset form state inside the mismatch branch (guarded by `if (visible)`). Or mount the modal only while open (`LoanRepaymentModal`, `CheckinCalendarModal`, `LoanDetailsModal`, `DateRangePickerModal` do this).
+2. **The tracked value must be `useState`, never `useRef`.** Any ref read or write during render throws.
+3. **Mutate `ref.current` only inside `useEffect`.** For `savingRef`, use a separate effect on `[visible, ...identity]`.
+4. **Never pass a ref, or a closure reading one, into a function called during render.** (Agent fix: module-level plain object written from an effect, tools built at module level.)
+5. **`Animated.Value`:** `const [v] = useState(() => new Animated.Value(x))`, not `useRef(...).current`.
+6. **A self-referencing `useCallback`** throws "accessed before declared". Store it in a ref, reassign in a dependency-less effect, call `ref.current()`.
+7. **One-time hydration flags:** `useSyncExternalStore(noopSubscribe, () => true, () => false)`.
+8. **Call hooks before any early `return null`.**
+9. **No `new Date()` in render.** Use a `null` meaning "today" resolved on save, or `useState(() => new Date())`.
+10. **`Alert.alert` is invisible on web.** New UI must show inline messages.
+11. **Web `ScrollView` in a column** needs `flex: 1` and `minHeight: 0`.
+12. Remove unused `useEffect` / `useRef` / `StyleSheet` imports.
+13. Use `useFocusEffect` from `expo-router`.
+
+---
+
+## 9. Working agreement
+
+- **Deliver full replacement files**, not diffs or find/replace. Snippets only when asked for "only that place" or when the real file text hasn't been seen. A partial edit failed once because the style definition was missing.
+- **Ask for real file contents before writing integration code.** Never rewrite from memory a file that hasn't been seen.
+- **Fix problems properly**, not around the edges.
+- **No unrequested UX polish.** The unprompted Home review list was rejected.
+- **Follow the roadmap.** Don't invent phases.
+- **User-facing renames** change text only, never type names, variable names or imports.
+- To revert a bad file, use git or GitLens on that one file (not Discard All), then fix the new part.
+- When a crashing file is pasted, apply the matching standing pattern from section 8 and name it.
+
+---
+
+## 10. Build and release
+
+**Profiles** (`eas.json`, verified fine)
+
+| Profile       | Use                                           | Output            |
+| ------------- | --------------------------------------------- | ----------------- |
+| `development` | Debug build with dev launcher (QR, localhost) | Not for daily use |
+| **`preview`** | **Standalone APK, opens straight to Home**    | **Daily app**     |
+| `production`  | Play Store `.aab`, auto-increment             | Later             |
+
+`cli.version ">= 25.3.0"`, `appVersionSource: "remote"`. The `preview` channel matches `eas update --branch preview`.
+
+**Commands**
+
+```bash
+# Standalone app
+eas build --profile preview --platform android
+
+# JS-only update (no rebuild); close and reopen the app twice
+eas update --branch preview --message "your message"
+
+# Put the Gemini key into EAS (names only; type the value in the prompt)
+grep -o "^[A-Za-z_]*=" .env
+eas env:create --environment preview
+eas env:list --environment preview
+```
+
+**Updates:** `eas update` from this computer bakes the local `.env` key into the JS. The first launch downloads, the second applies.
+
+**Installing over the old app:** same package and signing key keeps the data. If Android says "App not installed", uninstall the dev app and restore from a backup. **Export a backup first and keep it off the phone.**
+
+Backup does NOT cover recurring rules, custom categories, budgets, check-ins, notification settings, AI key, chat or theme (until the complete-backup work is done).
+
+**State at time of writing:** the preview build was running or queued on EAS. These were made **after** it started, so they are **not in the build** and need `eas update`:
+
+1. Home header date shrink.
+2. Settings label overflow fix.
+3. Period summary (Home card, Report custom days, History date filter).
+
+---
+
+## 11. Test checklists
+
+**Device (after the preview install)**
+
+1. App opens straight to Home, no launcher.
+2. The agent answers (proves the key was baked in) and speaks.
+3. Settings → NOTIFICATIONS ON → allow → test button, notification in about 5 s.
+4. SETTINGS in the bar opens from every page.
+5. Add a **new** item plan with a target date, then Edit it. If the date is gone, paste `use-purchase-plans.tsx` for the fix.
+6. Plan and loan reminders, recurring due today.
+
+**Web, period summary**
+
+1. Home card shows TODAY. Each chip changes the numbers. The calendar button opens the picker.
+2. SINGLE DAY: tap a day, APPLY, label and totals match.
+3. RANGE: tap two days in either order, days between are shaded, label like `1 NOV – 4 NOV 2026`, CUSTOM chip turns yellow, CANCEL changes nothing.
+4. Dark mode is readable.
+5. Report CUSTOM DAYS: picker, range button, hidden MoM and trend, CHANGE, MONTH restores, first-time cancel returns to MONTH.
+6. History: day and range filters, X clears, works with wallet chips, search and type filters.
+
+**Agent manage tools:** see 4.13.
+
+**Phase 7b loans (web, reported done):** header `PLANS & LOANS`; empty LENT text; add loan Rahim 1000 due tomorrow → `DUE IN 1D`; ADD PAYMENT and FULL REMAINING; overpayment shows inline error with SAVE disabled; trash twice deletes a payment; SETTLE ALL twice → SETTLED; deleting the settling payment reopens; swipe delete plus UNDO; lowering amount to paid sum auto-settles; item checkbox purchase; clearing a target date persists.
+
+---
+
+## 12. Open items
+
+**Check next (not yet reported)**
+
+- Whether the snippets (header date, settings labels, Home card placement) were applied.
+- `npx tsc --noEmit` output after the period summary. Likeliest trouble spots: `report.tsx` (return types of `summarizeMonth` and `getCategoryBreakdown` were never seen) and `UNIT_LABEL`.
+- Web test results for the period summary.
+- `grep -rn "CURRENCY" src | head -5`, so `UNIT_LABEL` can use the real constant.
+
+**Housekeeping (unconfirmed)**
+
+- Gemini key added to the EAS preview environment.
+- `.env` untracked.
+- Both Gemini keys rotated.
+- `agent-guide.tsx` line 92 still reads `"PURCHASE PLANS"`.
+- `confirmDialog` fix (`const { confirm: confirmDialog } = useConfirmDialog();`) and clear-chat fix in `agent.tsx` applied.
+
+**Approved work, in order**
+
+1. **Complete backup.** Add recurring rules, custom categories, budgets, check-ins, notification settings and theme as optional sections, so old backup files still restore. Needs from the user: full `backup-service.ts`; output of `grep -rn "@voice" src --include=*.ts --include=*.tsx`; the Settings code around `exportBackup` and `pickAndRestoreBackup` (about 30 lines each); a yes or no on leaving the AI key out.
+2. **Budget alerts.** Notification at 80% and 100% of a category or monthly budget, built on the notification planner. Needs `notification-planner.ts`, `notification-sync.tsx` and the budget files.
+3. **Quick-add favorites.** One-tap buttons such as "Tea 20", "Rickshaw 50", "Lunch 150". Needs the New Entry modal file.
+
+**After device tests**
+
+- Agent loan tools (add loan, record payment, settle). Update the `list_plans` description in `ai-manage-tools.ts` (it still says loans are not included, around lines 878 and 883). Move LOANS AND DEBTS to READY in `agent-guide.tsx` and rename the card "PLANS & LOANS".
+- Bangla/English speech-language switch in `use-voice.ts`.
+- Honest-error rewrite of `ai-client.ts` (needs the user's paste).
+- Optional CONSISTENCY badge description reword.
+- Optional check that `purchase-plan-storage.ts` doesn't strip loan fields.
+
+**Later ideas (not approved):** safe-to-spend today, monthly recap notification, CSV export, Bangla UI, receipt photos, cloud sync.
+
+**Small open items:** wallet swipe alignment unconfirmed; optional `actionsInsetBottom` for `SwipeableRow`; wallet brand logos waiting on the user's files; Saturday week-start for the recap; optional deletion of unused `voice-button.tsx`; small-screen modal check pending the user's screen size.
+
+**Harmless console messages:** `Permissions policy violation: unload`, `useNativeDriver is not supported`, `Blocked aria-hidden…`.
+
+---
+
+## 13. Files not yet seen
+
+These can't be safely rewritten without a paste:
+`src/services/purchase-plan-storage.ts`, `src/types/purchase-plan.ts`, `src/constants/badge-definitions.ts`, `swipeable-row.tsx`, `complete-plan-modal.tsx`, `date-picker-modal.tsx`, `brutal-box.tsx`, the `wallet-slider`, `weekly-recap-card` and `budget-card` components, `src/utils/monthly-report.ts`, `category-stats`, `format.ts`, and the file that defines `CURRENCY`.
